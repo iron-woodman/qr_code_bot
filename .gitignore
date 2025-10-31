@@ -1,0 +1,15 @@
+# Virtual environment
+.venv/
+
+# Environment variables
+.env
+
+# Generated QR codes
+qr_code_*.jpeg
+
+# PyCharm files
+.idea/
+
+# Python bytecode
+__pycache__/
+*.pyc

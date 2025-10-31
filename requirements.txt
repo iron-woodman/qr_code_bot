@@ -1,0 +1,4 @@
+aiogram
+qrcode
+python-dotenv
+Pillow
