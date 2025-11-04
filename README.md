@@ -86,10 +86,10 @@ TELEGRAM_BOT_TOKEN=ВАШ_ТОКЕН
 
 ### 7. Запуск бота
 
-Теперь вы можете запустить бота напрямую для проверки (используйте `main2.py` для полной функциональности):
+Теперь вы можете запустить бота напрямую для проверки:
 
 ```bash
-python3 main2.py
+python3 main.py
 ```
 
 Если все настроено правильно, бот начнет работать. Вы можете остановить его, нажав `Ctrl+C`.
@@ -104,7 +104,7 @@ python3 main2.py
 sudo nano /etc/systemd/system/qr-bot.service
 ```
 
-Вставьте в него следующую конфигурацию. **Обязательно** замените `/path/to/your/project` на полный путь к папке вашего проекта и `your_user` на ваше имя пользователя на VPS. Убедитесь, что `ExecStart` указывает на `main2.py`.
+Вставьте в него следующую конфигурацию. **Обязательно** замените `/path/to/your/project` на полный путь к папке вашего проекта и `your_user` на ваше имя пользователя на VPS. Убедитесь, что `ExecStart` указывает на `main.py`.
 
 ```ini
 [Unit]
@@ -115,7 +115,7 @@ After=network.target
 User=your_user
 Group=your_user
 WorkingDirectory=/path/to/your/project
-ExecStart=/path/to/your/project/.venv/bin/python3 /path/to/your/project/main2.py
+ExecStart=/path/to/your/project/.venv/bin/python3 /path/to/your/project/main.py
 Restart=always
 RestartSec=10
 
