@@ -13,3 +13,5 @@ qr_code_*.jpeg
 # Python bytecode
 __pycache__/
 *.pyc
+
+post.txt
