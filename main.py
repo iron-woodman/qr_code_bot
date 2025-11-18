@@ -2,14 +2,11 @@
 Основной файл для Telegram-бота, который генерирует и читает QR-коды.
 
 Этот бот умеет:
-- Принимать URL от пользователя и генерировать QR-код.
+- Принимать URL или текст от пользователя и генерировать QR-код.
 - Принимать изображение с QR-кодом и декодировать его, возвращая текст.
+- Проверять подписку на целевой канал.
 - Использовать машину состояний (FSM) для управления диалогом.
 """
-
-
-
-
 
 import asyncio
 import logging
@@ -19,7 +16,7 @@ import cv2
 import numpy as np
 import qrcode
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.exceptions import TelegramNetworkError
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.filters.command import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -35,11 +32,15 @@ logging.basicConfig(level=logging.INFO)
 # Загрузка переменных окружения из файла .env.
 load_dotenv()
 
-# Получение токена бота из переменных окружения.
+# Получение токена бота и ID целевого канала из переменных окружения.
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not BOT_TOKEN:
-    # Вызов ошибки, если токен не найден.
-    raise ValueError("Не найден TELEGRAM_BOT_TOKEN в переменных окружения")
+TARGET_CHANNEL_ID = os.getenv("TARGET_CHANNEL_ID")
+
+if not BOT_TOKEN or not TARGET_CHANNEL_ID:
+    # Вызов ошибки, если токен или ID канала не найдены.
+    raise ValueError(
+        "Не найден TELEGRAM_BOT_TOKEN или TARGET_CHANNEL_ID в переменных окружения"
+    )
 
 # --- Инициализация бота ---
 
@@ -54,10 +55,42 @@ class QRCodeStates(StatesGroup):
     """
     Определяет состояния, в которых может находиться диалог с пользователем.
     """
-    # Состояние ожидания URL или фотографии с QR-кодом.
-    waiting_for_url_or_photo = State()
+    # Состояние ожидания проверки подписки.
+    waiting_for_subscription_check = State()
+    # Состояние ожидания URL, текста или фотографии с QR-кодом.
+    waiting_for_input = State()
     # Состояние ожидания выбора цвета для QR-кода.
     waiting_for_color = State()
+
+
+# --- Проверка подписки ---
+
+async def is_user_subscribed(user_id: int) -> bool:
+    """
+    Проверяет, подписан ли пользователь на целевой канал.
+
+    Args:
+        user_id (int): ID пользователя Telegram.
+
+    Returns:
+        bool: True, если пользователь подписан, иначе False.
+    """
+    try:
+        # Получение информации о пользователе в канале.
+        member = await bot.get_chat_member(
+            chat_id=TARGET_CHANNEL_ID, user_id=user_id
+        )
+        # Проверка статуса пользователя.
+        return member.status in ["member", "administrator", "creator"]
+    except TelegramBadRequest:
+        # Перехват ошибки, если чат не найден (неверный ID или бот не в чате).
+        logging.error(f"Ошибка: чат с ID {TARGET_CHANNEL_ID} не найден. "
+                      f"Проверьте TARGET_CHANNEL_ID и права бота.")
+        # Возвращаем False, но можно добавить отправку сообщения администратору.
+        return False
+    except Exception as e:
+        logging.error(f"Непредвиденная ошибка при проверке подписки: {e}")
+        return False
 
 
 # --- Обработчики команд и сообщений ---
@@ -67,44 +100,93 @@ async def cmd_start(message: types.Message, state: FSMContext):
     """
     Обрабатывает команду /start.
 
-    Отправляет приветственное сообщение и переводит пользователя
-    в состояние ожидания URL или фото.
+    Проверяет подписку, отправляет приветственное сообщение и переводит
+    пользователя в соответствующее состояние.
 
     Args:
         message (types.Message): Объект сообщения от пользователя.
         state (FSMContext): Контекст машины состояний.
     """
-    await message.answer(
-        "Добро пожаловать! Я умею создавать QR-коды, а так же читать QR-коды "
-        "(извлекать данные из фото с QR-кодом). Отправьте мне URL для "
-        "генерации QR-кода или изображение с QR-кодом для декодирования."
-    )
-    # Установка начального состояния.
-    await state.set_state(QRCodeStates.waiting_for_url_or_photo)
+    user_id = message.from_user.id
 
-
-@dp.message(QRCodeStates.waiting_for_url_or_photo, F.text)
-async def process_url(message: types.Message, state: FSMContext):
-    """
-    Обрабатывает текстовое сообщение (URL) от пользователя.
-
-    Проверяет, является ли текст валидным URL, и запрашивает выбор
-    цвета для QR-кода.
-
-    Args:
-        message (types.Message): Объект сообщения от пользователя.
-        state (FSMContext): Контекст машины состояний.
-    """
-    # Проверка, что текст сообщения является URL.
-    if not message.text or not message.text.startswith(('http://', 'https://')):
+    if await is_user_subscribed(user_id):
+        # Если пользователь подписан.
         await message.answer(
-            "Это не похоже на URL. Пожалуйста, отправьте URL в виде текста, "
-            "начинающийся с 'http://' или 'https://'."
+            "Добро пожаловать! Я умею создавать QR-коды из URL или текста, "
+            "а так же читать QR-коды. Отправьте мне URL/текст для "
+            "генерации QR-кода или изображение с QR-кодом для декодирования."
         )
-        return
+        # Установка состояния ожидания ввода.
+        await state.set_state(QRCodeStates.waiting_for_input)
+    else:
+        # Если пользователь не подписан.
+        try:
+            # Получение информации о канале для создания ссылки-приглашения.
+            chat = await bot.get_chat(TARGET_CHANNEL_ID)
+            invite_link = chat.invite_link
+            if not invite_link:
+                # Если ссылка-приглашение не найдена, создаем новую.
+                invite_link = await bot.export_chat_invite_link(TARGET_CHANNEL_ID)
 
-    # Сохранение URL в данных состояния.
-    await state.update_data(url=message.text)
+            # Создание клавиатуры с кнопками "Подписаться" и "Проверить подписку".
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="Подписаться",
+                    url=invite_link
+                )],
+                [InlineKeyboardButton(
+                    text="Проверить подписку",
+                    callback_data="check_subscription"
+                )]
+            ])
+            await message.answer(
+                "Для использования бота, пожалуйста, подпишитесь на наш канал.",
+                reply_markup=keyboard
+            )
+            # Установка состояния ожидания проверки подписки.
+            await state.set_state(QRCodeStates.waiting_for_subscription_check)
+
+        except TelegramBadRequest:
+            logging.error(f"Критическая ошибка: не удалось получить информацию о канале {TARGET_CHANNEL_ID}. "
+                          f"Проверьте, что ID канала указан верно и бот имеет права администратора.")
+            await message.answer(
+                "Произошла ошибка конфигурации бота. Пожалуйста, сообщите администратору: "
+                "не удается найти целевой канал для проверки подписки. "
+                "Возможно, неверно указан ID канала или у бота нет прав."
+            )
+        except Exception as e:
+            logging.error(f"Непредвиденная ошибка в cmd_start: {e}")
+            await message.answer("Произошла непредвиденная ошибка. Попробуйте позже.")
+
+
+@dp.callback_query(F.data == "check_subscription", QRCodeStates.waiting_for_subscription_check)
+async def check_subscription_callback(callback_query: types.CallbackQuery, state: FSMContext):
+    """
+    Обрабатывает нажатие на кнопку "Проверить подписку".
+
+    Args:
+        callback_query (types.CallbackQuery): Объект callback-запроса.
+        state (FSMContext): Контекст машины состояний.
+    """
+    # Отправка пустого ответа для скрытия "часиков".
+    await callback_query.answer()
+    # Повторный вызов /start для проверки подписки.
+    await cmd_start(callback_query.message, state)
+
+
+@dp.message(QRCodeStates.waiting_for_input, F.text)
+async def process_text(message: types.Message, state: FSMContext):
+    """
+    Обрабатывает текстовое сообщение (URL или текст) от пользователя.
+
+    Запрашивает выбор цвета для QR-кода.
+
+    Args:
+        message (types.Message): Объект сообщения от пользователя.
+        state (FSMContext): Контекст машины состояний.
+    """
+    # Сохранение текста в данных состояния.
+    await state.update_data(text=message.text)
 
     # Создание кнопок для выбора темы QR-кода.
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -120,7 +202,7 @@ async def process_url(message: types.Message, state: FSMContext):
     await state.set_state(QRCodeStates.waiting_for_color)
 
 
-@dp.message(QRCodeStates.waiting_for_url_or_photo, F.photo)
+@dp.message(QRCodeStates.waiting_for_input, F.photo)
 async def process_photo(message: types.Message, state: FSMContext):
     """
     Обрабатывает сообщение с фотографией от пользователя.
@@ -139,7 +221,9 @@ async def process_photo(message: types.Message, state: FSMContext):
         downloaded_file = await bot.download_file(file_info.file_path)
 
         # Преобразование скачанного файла в формат, понятный для OpenCV.
-        file_bytes = np.asarray(bytearray(downloaded_file.read()), dtype=np.uint8)
+        file_bytes = np.asarray(
+            bytearray(downloaded_file.read()), dtype=np.uint8
+        )
         img = cv2.imdecode(file_bytes, cv2.IMREAD_GRAYSCALE)
 
         # Попытка декодирования оригинального изображения.
@@ -168,11 +252,11 @@ async def process_photo(message: types.Message, state: FSMContext):
     # Сброс состояния пользователя.
     await state.clear()
     await message.answer(
-        "Чтобы сгенерировать еще один QR-код, отправьте мне новый URL. "
+        "Чтобы сгенерировать QR-код, отправьте мне URL/текст. "
         "Чтобы прочитать QR-код - отправьте мне изображение."
     )
     # Установка начального состояния.
-    await state.set_state(QRCodeStates.waiting_for_url_or_photo)
+    await state.set_state(QRCodeStates.waiting_for_input)
 
 
 @dp.callback_query(QRCodeStates.waiting_for_color)
@@ -191,7 +275,7 @@ async def process_color_choice(callback_query: types.CallbackQuery, state: FSMCo
 
     color = callback_query.data
     user_data = await state.get_data()
-    url = user_data.get("url")
+    text = user_data.get("text")
 
     try:
         # Настройка параметров QR-кода.
@@ -201,7 +285,7 @@ async def process_color_choice(callback_query: types.CallbackQuery, state: FSMCo
             box_size=10,
             border=4,
         )
-        qr.add_data(url)
+        qr.add_data(text.encode('utf-8'))
         qr.make(fit=True)
 
         # Определение цветов в зависимости от выбора пользователя.
@@ -232,11 +316,11 @@ async def process_color_choice(callback_query: types.CallbackQuery, state: FSMCo
     # Сброс состояния.
     await state.clear()
     await callback_query.message.answer(
-        "Чтобы сгенерировать еще один QR-код, отправьте мне новый URL. "
+        "Чтобы сгенерировать еще один QR-код, отправьте мне URL/текст. "
         "Чтобы прочитать QR-код - отправьте мне изображение."
     )
     # Установка начального состояния.
-    await state.set_state(QRCodeStates.waiting_for_url_or_photo)
+    await state.set_state(QRCodeStates.waiting_for_input)
 
 
 # --- Запуск бота ---
@@ -253,7 +337,9 @@ async def main():
             await dp.start_polling(bot)
         except TelegramNetworkError:
             # Обработка проблем с сетью.
-            logging.warning("Соединение потеряно. Повторная попытка через 5 секунд...")
+            logging.warning(
+                "Соединение потеряно. Повторная попытка через 5 секунд..."
+            )
             await asyncio.sleep(5)
         except asyncio.exceptions.CancelledError:
             # Обработка остановки бота (например, по Ctrl+C).
